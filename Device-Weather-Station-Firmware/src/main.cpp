@@ -40,29 +40,27 @@ Adafruit_MAX31865 thermo = Adafruit_MAX31865(RTD_CS, RTD_DI, RTD_DO, RTD_CLK);
 void rain_gauge_interrupt();
 void anemometer_interrupt();
 
+#define mainAverageUpdateInterval 600 * 1000
+
 //Temperature
-#define TEMPERATURE_MEASUREMENT_INTERVAL 1000
-#define TEMPERATURE_AVERAGE_INTERVAL 60 * 1000
+#define TEMPERATURE_MEASUREMENT_INTERVAL 10000
 
 uint32_t temperatureAverageIntervalCount = 0;
 float temperatureBMEAverageIntervalSum = 0;
 float temperatureRTDAverageIntervalSum = 0;
 
 //Humidity
-#define HUMIDITY_MEASUREMENT_INTERVAL 1000
-#define HUMIDITY_AVERAGE_INTERVAL 60 * 1000
+#define HUMIDITY_MEASUREMENT_INTERVAL 10000
 uint32_t humidityAverageIntervalCount = 0;
 float humidityAverageIntervalSum = 0;
 
 //Pressure
-#define PRESSURE_MEASUREMENT_INTERVAL 1000
-#define PRESSURE_AVERAGE_INTERVAL 60 * 1000
+#define PRESSURE_MEASUREMENT_INTERVAL 10000
 uint32_t pressureAverageIntervalCount = 0;
 float pressureAverageIntervalSum = 0;
 
 //Wind speed
 #define WIND_SPEED_MEASUREMENT_INTERVAL 100
-#define WIND_SPEED_AVERAGE_INTERVAL 60 * 1000
 #define MIN_WIND_SPEED_DELTA 10000
 
 uint32_t anemometerLastPulse = 0;
@@ -74,7 +72,6 @@ float windSpeedIntervalMax = 0;
 
 //Wind Direction
 #define WIND_DIRECTION_MEASUREMENT_INTERVAL 100
-#define WIND_DIRECTION_AVERAGE_INTERVAL 60 * 1000
 
 uint32_t windDirectionAverageDirectionCounts[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 uint32_t windDirectionAverageIntervalCount = 0;
@@ -90,12 +87,15 @@ uint64_t windDirectionToMVMap[8][2] = {{0,2533},
                                       {315,2859}};
 
 //Rain gauge
-#define RAIN_GAUGE_AVERAGE_INTERVAL 60 * 1000
 #define MM_RAIN_PER_SWITCH_CLOSE 0.2794
 #define RAIN_GAUGE_DEBOUNCE_TIME 500
 
 uint64_t rainGaugeLastSwitchTime = 0;
 float rainGaugeAverageIntervalSum = 0;
+float rainGaugeHourly[] = {0,0,0,0,0,0};
+float rainGaugeDaily[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+uint8_t rainGaugeHourlyIndex = 0;
+uint8_t rainGaugeDailyIndex = 0;
 
 void IRAM_ATTR rain_gauge_interrupt(){
   if(millis() < rainGaugeLastSwitchTime + RAIN_GAUGE_DEBOUNCE_TIME){
@@ -131,26 +131,23 @@ void updateWindDirection(void *parameters){
   }
 }
 
-void updateWindDirectionAverage(void *parameters){
-  while(1){
-    delay(WIND_DIRECTION_AVERAGE_INTERVAL);
-    windDirectionMaxDirection = 0;
-    for(int i = 0; i < 8; i++){
-      if(windDirectionAverageDirectionCounts[i] > windDirectionAverageDirectionCounts[windDirectionMaxDirection]){
-        windDirectionMaxDirection = i;
-      }
-      float windDirectionAverage = (float)windDirectionAverageDirectionCounts[i]/(float)windDirectionAverageIntervalCount * 100.0;
-      Serial.println("Wind direction " + String(windDirectionToMVMap[i][0]) + "°: " + windDirectionAverage + "%");
-      core.sendMessage(0xA501 + i, &windDirectionAverage);
+void updateWindDirectionAverage(){
+  windDirectionMaxDirection = 0;
+  for(int i = 0; i < 8; i++){
+    if(windDirectionAverageDirectionCounts[i] > windDirectionAverageDirectionCounts[windDirectionMaxDirection]){
+      windDirectionMaxDirection = i;
     }
-    //float windDirectionMax = windDirectionToMVMap[windDirectionMaxDirection][0];
-    Serial.println("Wind direction max: " + String(windDirectionToMVMap[windDirectionMaxDirection][0]) + "°");
-    core.sendMessage(0xA500, &windDirectionToMVMap[windDirectionMaxDirection][0]);
-    windDirectionAverageIntervalCount = 0;
-    for(int i = 0; i < 8; i++){
-      windDirectionAverageDirectionCounts[i] = 0;
-    } 
+    float windDirectionAverage = (float)windDirectionAverageDirectionCounts[i]/(float)windDirectionAverageIntervalCount * 100.0;
+    Serial.println("Wind direction " + String(windDirectionToMVMap[i][0]) + "°: " + windDirectionAverage + "%");
+    core.sendMessage(0xA501 + i, &windDirectionAverage);
   }
+  //float windDirectionMax = windDirectionToMVMap[windDirectionMaxDirection][0];
+  Serial.println("Wind direction max: " + String(windDirectionToMVMap[windDirectionMaxDirection][0]) + "°");
+  core.sendMessage(0xA500, &windDirectionToMVMap[windDirectionMaxDirection][0]);
+  windDirectionAverageIntervalCount = 0;
+  for(int i = 0; i < 8; i++){
+    windDirectionAverageDirectionCounts[i] = 0;
+  } 
 }
 
 void updateWindSpeed(void *parameters){
@@ -171,18 +168,15 @@ void updateWindSpeed(void *parameters){
   }
 }
 
-void updateWindSpeedAverage(void *parameters){
-  while(1){
-    delay(WIND_SPEED_AVERAGE_INTERVAL);
-    float windSpeedAverage = windSpeedAverageIntervalSum / windSpeedAverageIntervalCount;
-    Serial.println("Wind speed average: " + String(windSpeedAverage) + " km/h");
-    Serial.println("Wind speed max: " + String(windSpeedIntervalMax) + " km/h");
-    core.sendMessage(0xA400, &windSpeedAverage);
-    core.sendMessage(0xA401, &windSpeedIntervalMax);
-    windSpeedAverageIntervalCount = 0;
-    windSpeedAverageIntervalSum = 0;
-    windSpeedIntervalMax = 0;
-  }
+void updateWindSpeedAverage(){
+  float windSpeedAverage = windSpeedAverageIntervalSum / windSpeedAverageIntervalCount;
+  Serial.println("Wind speed average: " + String(windSpeedAverage) + " km/h");
+  Serial.println("Wind speed max: " + String(windSpeedIntervalMax) + " km/h");
+  core.sendMessage(0xA400, &windSpeedAverage);
+  core.sendMessage(0xA401, &windSpeedIntervalMax);
+  windSpeedAverageIntervalCount = 0;
+  windSpeedAverageIntervalSum = 0;
+  windSpeedIntervalMax = 0;
 }
 
 void updateTemperature(void *parameters){
@@ -220,20 +214,16 @@ void updateTemperature(void *parameters){
   }
 }
 
-void updateTemperatureAverage(void *parameters){
-  while (1)
-  {
-    delay(TEMPERATURE_AVERAGE_INTERVAL);
-    float temperatureBMEAverage = temperatureBMEAverageIntervalSum / temperatureAverageIntervalCount;
-    float temperatureRTDAverage = temperatureRTDAverageIntervalSum / temperatureAverageIntervalCount;
-    Serial.println("Temperature BME average: " + String(temperatureBMEAverage) + " °C");
-    Serial.println("Temperature RTD average: " + String(temperatureRTDAverage) + " °C");
-    core.sendMessage(0xA100, &temperatureBMEAverage);
-    core.sendMessage(0xA101, &temperatureRTDAverage);
-    temperatureAverageIntervalCount = 0;
-    temperatureBMEAverageIntervalSum = 0;
-    temperatureRTDAverageIntervalSum = 0;
-  }
+void updateTemperatureAverage(){
+  float temperatureBMEAverage = temperatureBMEAverageIntervalSum / temperatureAverageIntervalCount;
+  float temperatureRTDAverage = temperatureRTDAverageIntervalSum / temperatureAverageIntervalCount;
+  Serial.println("Temperature BME average: " + String(temperatureBMEAverage) + " °C");
+  Serial.println("Temperature RTD average: " + String(temperatureRTDAverage) + " °C");
+  core.sendMessage(0xA100, &temperatureBMEAverage);
+  core.sendMessage(0xA101, &temperatureRTDAverage);
+  temperatureAverageIntervalCount = 0;
+  temperatureBMEAverageIntervalSum = 0;
+  temperatureRTDAverageIntervalSum = 0;
 }
 
 void updateHumidity(void *parameters){
@@ -244,15 +234,12 @@ void updateHumidity(void *parameters){
   }
 }
 
-void updateHumidityAverage(void *parameters){
-  while(1){
-    delay(HUMIDITY_AVERAGE_INTERVAL);
-    float humidityAverage = humidityAverageIntervalSum / humidityAverageIntervalCount;
-    Serial.println("Humidity average: " + String(humidityAverage) + " %");
-    core.sendMessage(0xA200, &humidityAverage);
-    humidityAverageIntervalCount = 0;
-    humidityAverageIntervalSum = 0;
-  }
+void updateHumidityAverage(){
+  float humidityAverage = humidityAverageIntervalSum / humidityAverageIntervalCount;
+  Serial.println("Humidity average: " + String(humidityAverage) + " %");
+  core.sendMessage(0xA200, &humidityAverage);
+  humidityAverageIntervalCount = 0;
+  humidityAverageIntervalSum = 0;
 }
 
 void updatePressure(void *parameters){
@@ -263,23 +250,66 @@ void updatePressure(void *parameters){
   }
 }
 
-void updatePressureAverage(void *parameters){
-  while(1){
-    delay(PRESSURE_AVERAGE_INTERVAL);
-    float pressureAverage = pressureAverageIntervalSum / pressureAverageIntervalCount;
-    Serial.println("Pressure average: " + String(pressureAverage / 100.0F) + " hPa");
-    core.sendMessage(0xA300, &pressureAverage);
-    pressureAverageIntervalCount = 0;
-    pressureAverageIntervalSum = 0;
-  }
+void updatePressureAverage(){
+  float pressureAverage = pressureAverageIntervalSum / pressureAverageIntervalCount;
+  Serial.println("Pressure average: " + String(pressureAverage / 100.0F) + " hPa");
+  core.sendMessage(0xA300, &pressureAverage);
+  delay(1000);
+  pressureAverageIntervalCount = 0;
+  pressureAverageIntervalSum = 0;
 }
 
-void updateRainGaugeAverage(void *parameters){
+void updateRainGaugeAverage(){
+  Serial.println("Rain gauge average: " + String(rainGaugeAverageIntervalSum) + " mm");
+  core.sendMessage(0xA600, &rainGaugeAverageIntervalSum);
+  rainGaugeHourly[rainGaugeHourlyIndex] = rainGaugeAverageIntervalSum;
+  float rainGaugeHourlySum = 0;
+  for(int i = 0; i < 6; i++){
+    rainGaugeHourlySum += rainGaugeHourly[i];
+  }
+  Serial.println("Rain gauge hourly sum: " + String(rainGaugeHourlySum) + " mm");
+  core.sendMessage(0xA601, &rainGaugeHourlySum);
+  delay(1000);
+
+  rainGaugeHourlyIndex++;
+  if(rainGaugeHourlyIndex >= 6){
+    rainGaugeHourlyIndex = 0;
+    rainGaugeDaily[rainGaugeDailyIndex] = rainGaugeHourlySum;
+    rainGaugeDailyIndex++;
+    if(rainGaugeDailyIndex >= 24){
+      rainGaugeDailyIndex = 0;
+    }
+  }
+  float rainGaugeDailySum = 0;
+  for(int i = 0; i < 24; i++){
+    rainGaugeDailySum += rainGaugeDaily[i];
+  }
+  Serial.println("Rain gauge daily sum: " + String(rainGaugeDailySum) + " mm");
+  core.sendMessage(0xA602, &rainGaugeDailySum);
+  
+  rainGaugeAverageIntervalSum = 0;
+}
+
+void mainUpdateAverage(void *parameters){
+  uint64_t timeDelta = 0;
   while(1){
-    delay(RAIN_GAUGE_AVERAGE_INTERVAL);
-    Serial.println("Rain gauge average: " + String(rainGaugeAverageIntervalSum) + " mm");
-    core.sendMessage(0xA600, &rainGaugeAverageIntervalSum);
-    rainGaugeAverageIntervalSum = 0;
+    delay(mainAverageUpdateInterval - timeDelta);
+    uint64_t startTime = millis();
+    uint64_t data = 0;
+    core.sendMessage(0x4001, &data);
+    delay(1000);
+    updateTemperatureAverage();
+    delay(1000);
+    updateHumidityAverage();
+    delay(1000);
+    updatePressureAverage();
+    delay(1000);
+    updateWindSpeedAverage();
+    delay(1000);
+    updateWindDirectionAverage();
+    delay(1000);
+    updateRainGaugeAverage();
+    timeDelta = millis() - startTime;
   }
 }
 
@@ -340,14 +370,6 @@ void setup() {
     10,
     NULL
   );
-  xTaskCreate(
-    updateWindSpeedAverage,
-    "updateWindSpeedAverage",
-    10000,
-    NULL,
-    20,
-    NULL
-  );
 
   //Temperature
   xTaskCreate(
@@ -358,14 +380,6 @@ void setup() {
     10,
     NULL
   );
-  xTaskCreate(
-    updateTemperatureAverage,
-    "updateTemperatureAverage",
-    10000,
-    NULL,
-    20,
-    NULL
-  );
 
   //Humidity
   xTaskCreate(
@@ -374,14 +388,6 @@ void setup() {
     10000,
     NULL,
     10,
-    NULL
-  );
-  xTaskCreate(
-    updateHumidityAverage,
-    "updateHumidityAverage",
-    10000,
-    NULL,
-    20,
     NULL
   );
 
@@ -396,25 +402,6 @@ void setup() {
     NULL
   );
 
-  xTaskCreate(
-    updatePressureAverage,
-    "updatePressureAverage",
-    10000,
-    NULL,
-    20,
-    NULL
-  );
-
-  //Rain gauge
-  xTaskCreate(
-    updateRainGaugeAverage,
-    "updateRainGaugeAverage",
-    10000,
-    NULL,
-    20,
-    NULL
-  );
-
   //Wind direction
   xTaskCreate(
     updateWindDirection,
@@ -424,12 +411,14 @@ void setup() {
     10,
     NULL
   );
+
+  //Main average update
   xTaskCreate(
-    updateWindDirectionAverage,
-    "updateWindDirectionAverage",
+    mainUpdateAverage,
+    "mainUpdateAverage",
     10000,
     NULL,
-    20,
+    10,
     NULL
   );
 
