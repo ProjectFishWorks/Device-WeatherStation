@@ -1,9 +1,12 @@
+#include <NodeControllerCore.h>
 #include <Arduino.h>
 #include <Wire.h>
 
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <Adafruit_MAX31865.h>
+
+#define NODE_ID 0xAB
 
 #define KPH_PER_SWITCH_CLOSE 2.4
 #define MM_RAIN_PER_SWITCH_CLOSE 0.2794
@@ -23,6 +26,8 @@
 #define RTD_DI 10
 #define RTD_DO 9
 
+NodeControllerCore core;
+
 Adafruit_BME280 bme;
 
 Adafruit_MAX31865 thermo = Adafruit_MAX31865(RTD_CS, RTD_DI, RTD_DO, RTD_CLK);
@@ -37,7 +42,7 @@ void anemometer_interrupt();
 
 //Temperature
 #define TEMPERATURE_MEASUREMENT_INTERVAL 1000
-#define TEMPERATURE_AVERAGE_INTERVAL 10000
+#define TEMPERATURE_AVERAGE_INTERVAL 60 * 1000
 
 uint32_t temperatureAverageIntervalCount = 0;
 float temperatureBMEAverageIntervalSum = 0;
@@ -45,19 +50,20 @@ float temperatureRTDAverageIntervalSum = 0;
 
 //Humidity
 #define HUMIDITY_MEASUREMENT_INTERVAL 1000
-#define HUMIDITY_AVERAGE_INTERVAL 10000
+#define HUMIDITY_AVERAGE_INTERVAL 60 * 1000
 uint32_t humidityAverageIntervalCount = 0;
 float humidityAverageIntervalSum = 0;
 
 //Pressure
 #define PRESSURE_MEASUREMENT_INTERVAL 1000
-#define PRESSURE_AVERAGE_INTERVAL 10000
+#define PRESSURE_AVERAGE_INTERVAL 60 * 1000
 uint32_t pressureAverageIntervalCount = 0;
 float pressureAverageIntervalSum = 0;
 
 //Wind speed
 #define WIND_SPEED_MEASUREMENT_INTERVAL 100
-#define WIND_SPEED_AVERAGE_INTERVAL 10000
+#define WIND_SPEED_AVERAGE_INTERVAL 60 * 1000
+#define MIN_WIND_SPEED_DELTA 10000
 
 uint32_t anemometerLastPulse = 0;
 uint32_t anemometerCurrentTimeDelta = 0;
@@ -66,9 +72,37 @@ float windSpeedAverageIntervalSum = 0;
 uint16_t windSpeedAverageIntervalCount = 0;
 float windSpeedIntervalMax = 0;
 
+//Wind Direction
+#define WIND_DIRECTION_MEASUREMENT_INTERVAL 100
+#define WIND_DIRECTION_AVERAGE_INTERVAL 60 * 1000
+
+uint32_t windDirectionAverageDirectionCounts[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+uint32_t windDirectionAverageIntervalCount = 0;
+uint64_t windDirectionMaxDirection = 0;
+
+uint64_t windDirectionToMVMap[8][2] = {{0,2533},
+                                      {45,1487},
+                                      {90,300},
+                                      {135,595},
+                                      {180,926},
+                                      {225,2031},
+                                      {270,3046},
+                                      {315,2859}};
+
+//Rain gauge
+#define RAIN_GAUGE_AVERAGE_INTERVAL 60 * 1000
+#define MM_RAIN_PER_SWITCH_CLOSE 0.2794
+#define RAIN_GAUGE_DEBOUNCE_TIME 500
+
+uint64_t rainGaugeLastSwitchTime = 0;
+float rainGaugeAverageIntervalSum = 0;
+
 void IRAM_ATTR rain_gauge_interrupt(){
-  Serial.println("Rain gauge interrupt");
-  //delay(15);
+  if(millis() < rainGaugeLastSwitchTime + RAIN_GAUGE_DEBOUNCE_TIME){
+    return;
+  }
+  rainGaugeAverageIntervalSum += MM_RAIN_PER_SWITCH_CLOSE;
+  rainGaugeLastSwitchTime = millis();
 }
 
 void IRAM_ATTR anemometer_interrupt(){
@@ -80,11 +114,55 @@ void IRAM_ATTR anemometer_interrupt(){
   anemometerLastPulse = millis();
 }
 
+void updateWindDirection(void *parameters){
+  while(1){
+    delay(WIND_DIRECTION_MEASUREMENT_INTERVAL);
+    uint32_t windVaneValue = analogReadMilliVolts(WIND_VANE_PIN);
+    //Serial.println("Wind Vane voltage: " + String(windVaneValue));
+    uint8_t windDirection = 0;
+    for(int i = 0; i < 8; i++){
+      if(windVaneValue >= windDirectionToMVMap[i][1] - 100 && windVaneValue <= windDirectionToMVMap[i][1] + 100){
+        windDirection = i;
+        break;
+      }
+    }
+    windDirectionAverageDirectionCounts[windDirection]++;
+    windDirectionAverageIntervalCount++;
+  }
+}
+
+void updateWindDirectionAverage(void *parameters){
+  while(1){
+    delay(WIND_DIRECTION_AVERAGE_INTERVAL);
+    windDirectionMaxDirection = 0;
+    for(int i = 0; i < 8; i++){
+      if(windDirectionAverageDirectionCounts[i] > windDirectionAverageDirectionCounts[windDirectionMaxDirection]){
+        windDirectionMaxDirection = i;
+      }
+      float windDirectionAverage = (float)windDirectionAverageDirectionCounts[i]/(float)windDirectionAverageIntervalCount * 100.0;
+      Serial.println("Wind direction " + String(windDirectionToMVMap[i][0]) + "°: " + windDirectionAverage + "%");
+      core.sendMessage(0xA501 + i, &windDirectionAverage);
+    }
+    //float windDirectionMax = windDirectionToMVMap[windDirectionMaxDirection][0];
+    Serial.println("Wind direction max: " + String(windDirectionToMVMap[windDirectionMaxDirection][0]) + "°");
+    core.sendMessage(0xA500, &windDirectionToMVMap[windDirectionMaxDirection][0]);
+    windDirectionAverageIntervalCount = 0;
+    for(int i = 0; i < 8; i++){
+      windDirectionAverageDirectionCounts[i] = 0;
+    } 
+  }
+}
+
 void updateWindSpeed(void *parameters){
   while (1)
   {
     delay(WIND_SPEED_MEASUREMENT_INTERVAL);
-    float currentWindSpeed = 1000.0 / anemometerCurrentTimeDelta * 2.4;
+    float currentWindSpeed = 0;
+    if(((millis() - anemometerLastPulse) <= MIN_WIND_SPEED_DELTA) && (anemometerCurrentTimeDelta != 0)){
+       currentWindSpeed = 1000.0 / anemometerCurrentTimeDelta * 2.4;
+    }else{
+      currentWindSpeed = 0;
+    }
     windSpeedAverageIntervalCount++;
     windSpeedAverageIntervalSum += currentWindSpeed;
     if(currentWindSpeed > windSpeedIntervalMax){
@@ -99,6 +177,8 @@ void updateWindSpeedAverage(void *parameters){
     float windSpeedAverage = windSpeedAverageIntervalSum / windSpeedAverageIntervalCount;
     Serial.println("Wind speed average: " + String(windSpeedAverage) + " km/h");
     Serial.println("Wind speed max: " + String(windSpeedIntervalMax) + " km/h");
+    core.sendMessage(0xA400, &windSpeedAverage);
+    core.sendMessage(0xA401, &windSpeedIntervalMax);
     windSpeedAverageIntervalCount = 0;
     windSpeedAverageIntervalSum = 0;
     windSpeedIntervalMax = 0;
@@ -109,9 +189,34 @@ void updateTemperature(void *parameters){
   while (1)
   {
     delay(TEMPERATURE_MEASUREMENT_INTERVAL);
-    temperatureBMEAverageIntervalSum += bme.readTemperature();
-    temperatureRTDAverageIntervalSum += thermo.temperature(RNOMINAL, RREF);
-    temperatureAverageIntervalCount++; 
+    uint8_t fault = thermo.readFault();
+    if(!fault){
+      temperatureBMEAverageIntervalSum += bme.readTemperature();
+      temperatureRTDAverageIntervalSum += thermo.temperature(RNOMINAL, RREF);
+      temperatureAverageIntervalCount++; 
+    }else{
+      Serial.print("Fault 0x"); Serial.println(fault, HEX);
+      core.sendMessage(0x4000, (uint64_t*)&fault);
+      if (fault & MAX31865_FAULT_HIGHTHRESH) {
+        Serial.println("RTD High Threshold"); 
+      }
+      if (fault & MAX31865_FAULT_LOWTHRESH) {
+        Serial.println("RTD Low Threshold"); 
+      }
+      if (fault & MAX31865_FAULT_REFINLOW) {
+        Serial.println("REFIN- > 0.85 x Bias"); 
+      }
+      if (fault & MAX31865_FAULT_REFINHIGH) {
+        Serial.println("REFIN- < 0.85 x Bias - FORCE- open"); 
+      }
+      if (fault & MAX31865_FAULT_RTDINLOW) {
+        Serial.println("RTDIN- < 0.85 x Bias - FORCE- open"); 
+      }
+      if (fault & MAX31865_FAULT_OVUV) {
+        Serial.println("Under/Over voltage"); 
+      }
+      thermo.clearFault();
+    }
   }
 }
 
@@ -123,6 +228,8 @@ void updateTemperatureAverage(void *parameters){
     float temperatureRTDAverage = temperatureRTDAverageIntervalSum / temperatureAverageIntervalCount;
     Serial.println("Temperature BME average: " + String(temperatureBMEAverage) + " °C");
     Serial.println("Temperature RTD average: " + String(temperatureRTDAverage) + " °C");
+    core.sendMessage(0xA100, &temperatureBMEAverage);
+    core.sendMessage(0xA101, &temperatureRTDAverage);
     temperatureAverageIntervalCount = 0;
     temperatureBMEAverageIntervalSum = 0;
     temperatureRTDAverageIntervalSum = 0;
@@ -142,6 +249,7 @@ void updateHumidityAverage(void *parameters){
     delay(HUMIDITY_AVERAGE_INTERVAL);
     float humidityAverage = humidityAverageIntervalSum / humidityAverageIntervalCount;
     Serial.println("Humidity average: " + String(humidityAverage) + " %");
+    core.sendMessage(0xA200, &humidityAverage);
     humidityAverageIntervalCount = 0;
     humidityAverageIntervalSum = 0;
   }
@@ -160,18 +268,39 @@ void updatePressureAverage(void *parameters){
     delay(PRESSURE_AVERAGE_INTERVAL);
     float pressureAverage = pressureAverageIntervalSum / pressureAverageIntervalCount;
     Serial.println("Pressure average: " + String(pressureAverage / 100.0F) + " hPa");
+    core.sendMessage(0xA300, &pressureAverage);
     pressureAverageIntervalCount = 0;
     pressureAverageIntervalSum = 0;
   }
+}
+
+void updateRainGaugeAverage(void *parameters){
+  while(1){
+    delay(RAIN_GAUGE_AVERAGE_INTERVAL);
+    Serial.println("Rain gauge average: " + String(rainGaugeAverageIntervalSum) + " mm");
+    core.sendMessage(0xA600, &rainGaugeAverageIntervalSum);
+    rainGaugeAverageIntervalSum = 0;
+  }
+}
+
+void receivedCANBUSMessage(uint8_t nodeID, uint16_t messageID, uint64_t data){
+  //Serial.println("Received message from node " + String(nodeID) + " with message ID " + String(messageID) + " and data " + String(data));
 }
 
 void setup() {
   // put your setup code here, to run once:
   pinMode(WIND_VANE_PIN,INPUT);
   Serial.begin(115200);
-  while(!Serial); 
 
   Wire.begin(I2C_SDA, I2C_SCL);
+
+  // Start the Node Controller
+  core = NodeControllerCore();
+  if(core.Init(receivedCANBUSMessage, NODE_ID)){
+      Serial.println("Node Controller Core Started");
+  } else {
+      Serial.println("Node Controller Core Failed to Start");
+  }
 
   //BME280
   unsigned status;
@@ -270,6 +399,34 @@ void setup() {
   xTaskCreate(
     updatePressureAverage,
     "updatePressureAverage",
+    10000,
+    NULL,
+    20,
+    NULL
+  );
+
+  //Rain gauge
+  xTaskCreate(
+    updateRainGaugeAverage,
+    "updateRainGaugeAverage",
+    10000,
+    NULL,
+    20,
+    NULL
+  );
+
+  //Wind direction
+  xTaskCreate(
+    updateWindDirection,
+    "updateWindDirection",
+    10000,
+    NULL,
+    10,
+    NULL
+  );
+  xTaskCreate(
+    updateWindDirectionAverage,
+    "updateWindDirectionAverage",
     10000,
     NULL,
     20,
