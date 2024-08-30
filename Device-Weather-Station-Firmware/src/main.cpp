@@ -92,6 +92,7 @@ uint64_t windDirectionToMVMap[8][2] = {{0,2533},
 
 uint64_t rainGaugeLastSwitchTime = 0;
 float rainGaugeAverageIntervalSum = 0;
+float rainGaugeAverageHourlySum = 0; 
 float rainGaugeHourly[] = {0,0,0,0,0,0};
 float rainGaugeDaily[] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 uint8_t rainGaugeHourlyIndex = 0;
@@ -102,6 +103,7 @@ void IRAM_ATTR rain_gauge_interrupt(){
     return;
   }
   rainGaugeAverageIntervalSum += MM_RAIN_PER_SWITCH_CLOSE;
+  rainGaugeAverageHourlySum += MM_RAIN_PER_SWITCH_CLOSE;
   rainGaugeLastSwitchTime = millis();
 }
 
@@ -262,6 +264,7 @@ void updatePressureAverage(){
 void updateRainGaugeAverage(){
   Serial.println("Rain gauge average: " + String(rainGaugeAverageIntervalSum) + " mm");
   core.sendMessage(0xA600, &rainGaugeAverageIntervalSum);
+  delay(1000);
   rainGaugeHourly[rainGaugeHourlyIndex] = rainGaugeAverageIntervalSum;
   float rainGaugeHourlySum = 0;
   for(int i = 0; i < 6; i++){
@@ -272,9 +275,11 @@ void updateRainGaugeAverage(){
   delay(1000);
 
   rainGaugeHourlyIndex++;
+
+  rainGaugeDaily[rainGaugeDailyIndex] = rainGaugeAverageHourlySum;
   if(rainGaugeHourlyIndex >= 6){
     rainGaugeHourlyIndex = 0;
-    rainGaugeDaily[rainGaugeDailyIndex] = rainGaugeHourlySum;
+    rainGaugeAverageHourlySum = 0;
     rainGaugeDailyIndex++;
     if(rainGaugeDailyIndex >= 24){
       rainGaugeDailyIndex = 0;
